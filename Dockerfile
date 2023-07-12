@@ -83,7 +83,7 @@ RUN dnf config-manager --disableplugin=subscription-manager \
 ENV LIBRARY_PATH="$CUDA_HOME/lib64/stubs"
 
 ## Rust builder ################################################################
-FROM rust:1.69 as rust-builder
+FROM rust:1.69-buster as rust-builder
 ARG PROTOC_VERSION
 
 # Install protoc, no longer included in prost crate
