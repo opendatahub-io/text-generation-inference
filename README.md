@@ -31,7 +31,7 @@ Some upstream changes were intentionally not pulled in because they weren't requ
 - Length penalty, min new tokens parameters
 - Optimum integration (for Onnx Runtime and BetterTransformer)
 - Support for tuned prompts, as trained via the PEFT library (not for flash or sharded impls yet)
-
+- Support for PyTorch 2 compile
 
 ---
 
@@ -53,3 +53,54 @@ make build
 cd deployment
 ./deploy_model.sh <model-subdir-name>
 ```
+
+---
+
+### Model configuration
+
+When deploying TGIS, the `MODEL_NAME` environment variable can contain either the full name of a model on the Hugging Face hub (such as `google/flan-ul2`) or an absolute path to a (mounted) model directory inside the container. In the former case, the `TRANSFORMERS_CACHE` and `HUGGINGFACE_HUB_CACHE` environment variables should be set to the path of a mounted directory containing a local HF hub model cache, see [this](deployment/base/patches/pvcs/pvc.yaml) kustomize patch as an example.
+
+### Downloading model weights
+
+TGIS will not download model data at runtime. To populate the local HF hub cache with models so that it can be used per above, the image can be run with the following command:
+```shell
+text-generation-server download-weights --extension ".json,.bin,.md,.model,.py" model_name
+```
+where `model_name` is the name of the model on the HF hub. Ensure that it's run with the same mounted directory and `TRANSFORMERS_CACHE` and `HUGGINGFACE_HUB_CACHE` environment variables, and that it has write access to this mounted filesystem. 
+
+### Running sharded models (Tensor Parallel)
+
+The following model types can currently be run in sharded mode where the weights are split across multiple GPUs:
+- BLOOM
+- T5
+- RefinedWeb (Falcon) (*)
+- LLaMA (*)
+
+(*) These require GPUs that support Flash Attention such as A100, A10
+
+Model weights must be in `safetensors` format. These are available on the HF hub for some models and can be downloaded like:
+```shell
+text-generation-server download-weights --extension ".json,.safetensors,.md,.model,.py" model_name
+```
+or otherwise can be converted from PyTorch `.bin` weights:
+```shell
+text-generation-server convert-to-safetensors model_name
+```
+
+Then ensure that the `CUDA_VISIBLE_DEVICES` environment variable is set appropriately (e.g. "0,1" to use the first two GPUs). The number of GPUs to use will be inferred from this or else can be set explicitly with the `NUM_GPUS` environment variable.
+
+### TLS configuration
+
+TLS can be enabled in the TGIS containers via the following env vars:
+
+- `TLS_CERT_PATH` - path to cert
+- `TLS_KEY_PATH` - path to private key
+- `TLS_CLIENT_CA_CERT_PATH` - path to ca cert to use for client authentication (optional, client auth not enabled if omitted)
+
+These paths can reference mounted secrets containing the certs.
+
+### Metrics
+
+Prometheus metrics are exposed on the same port as the health probe endpoint (default 3000), at `/metrics`.
+
+They are all prefixed with `tgi_`. A full list with descriptions will be added here soon.

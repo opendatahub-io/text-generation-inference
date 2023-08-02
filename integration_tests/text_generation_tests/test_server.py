@@ -22,7 +22,14 @@ TESTS_TIMEOUT = 210.0  # 3.5 mins
 
 
 def start_server(
-    model_name: str, extensions: str, num_shard: int, port: int, master_port: int, timeout=20, model_path=None
+    model_name: str,
+    extensions: str,
+    num_shard: int,
+    port: int,
+    master_port: int,
+    timeout=20,
+    model_path=None,
+    include_cache_env_vars=True,
 ):
     # Download weights to the cache first
     print(f"Downloading files for model {model_name}...")
@@ -58,6 +65,9 @@ def start_server(
 
     env = os.environ.copy()
     env["RUST_BACKTRACE"] = "full"
+    if not include_cache_env_vars:
+        env.pop("TRANSFORMERS_CACHE", None)
+        env.pop("HUGGING_FACE_HUB_CACHE", None)
 
     # Start the process
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
@@ -268,6 +278,10 @@ async def run_test_cases_async(test_cases, seq2seq_model=False):
             d.result()  # will raise if failed
         assert unfinished == 0, f"{unfinished} tests not finished before timeout of {TESTS_TIMEOUT}s"
 
+        # Verify metrics endpoint
+        response = requests.get(f'http://localhost:{3000}/metrics')
+        assert response.status_code == 200
+
 
 async def _test_multi_input_seeds(stub):
     # Ensure that sending a batch of identical inputs in sampling mode results
@@ -321,19 +335,29 @@ async def test_bloom(server_fixture, test_cases):
 
 # Test loading when an explicit local path is provided
 def test_explicit_path():
+    # Test with and without providing TRANSFORMERS_CACHE env var
     path = glob.glob(f'{os.environ["TRANSFORMERS_CACHE"]}/models--bigscience--mt0-small/snapshots/*')[0]
-    p = start_server("bigscience/mt0-small", ".bin,.json,.model", 1, 3000, 29502, model_path=path)
-    try:
-        async def test_model_info() -> pb2.ModelInfoResponse:
-            async with grpc.aio.insecure_channel('localhost:8033') as channel:
-                return await gpb2.GenerationServiceStub(channel).ModelInfo(pb2.ModelInfoRequest(model_id="unused"))
+    for include_env_vars in [False, True]:
+        p = start_server(
+            "bigscience/mt0-small",
+            ".bin,.json,.model",
+            1,
+            3000,
+            29502,
+            model_path=path,
+            include_cache_env_vars=include_env_vars,
+        )
+        try:
+            async def test_model_info() -> pb2.ModelInfoResponse:
+                async with grpc.aio.insecure_channel('localhost:8033') as channel:
+                    return await gpb2.GenerationServiceStub(channel).ModelInfo(pb2.ModelInfoRequest(model_id="unused"))
 
-        result = asyncio.get_event_loop().run_until_complete(test_model_info())
-        assert result.max_sequence_length == 200
-        assert result.max_new_tokens == 169
-        assert result.model_kind == pb2.ModelInfoResponse.ModelKind.ENCODER_DECODER
-    finally:
-        p.terminate()
+            result = asyncio.get_event_loop().run_until_complete(test_model_info())
+            assert result.max_sequence_length == 200
+            assert result.max_new_tokens == 169
+            assert result.model_kind == pb2.ModelInfoResponse.ModelKind.ENCODER_DECODER
+        finally:
+            p.terminate()
 
     assert p.wait(8.0) == 0
 

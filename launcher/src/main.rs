@@ -23,10 +23,12 @@ struct Args {
     model_name: String,
     #[clap(long, env)]
     revision: Option<String>,
-    #[clap(default_value = "hf_accelerate", long, env)]
+    #[clap(default_value = "hf_transformers", long, env)]
     deployment_framework: String,
-    #[clap(default_value = "float16", long, env)]
-    dtype_str: String,
+    #[clap(default_value = None, long, env)]
+    dtype: Option<String>,
+    #[clap(default_value = None, long, env)]
+    dtype_str: Option<String>,
     #[clap(long, env)]
     num_shard: Option<usize>,
     #[clap(default_value = "96", long, env)]
@@ -41,10 +43,12 @@ struct Args {
     max_batch_weight: Option<usize>,
     #[clap(default_value = None, long, env)]
     max_prefill_weight: Option<usize>,
-    #[clap(default_value = "20", long, env)]
+    #[clap(default_value = "24", long, env)]
     max_waiting_tokens: usize,
     #[clap(default_value = "3000", long, short, env)]
     port: u16,
+    #[clap(default_value = "8033", long, short, env)]
+    grpc_port: u16,
     #[clap(default_value = "/tmp/text-generation-server", long, env)]
     shard_uds_path: String,
     #[clap(default_value = "localhost", long, env)]
@@ -61,6 +65,8 @@ struct Args {
     tls_client_ca_cert_path: Option<String>,
     #[clap(long, env)]
     output_special_tokens: bool,
+    #[clap(default_value = "1.0", long, short, env)]
+    cuda_process_memory_fraction: f32,
 }
 
 fn main() -> ExitCode {
@@ -74,9 +80,19 @@ fn main() -> ExitCode {
     }
 
     info!("Launcher args: {:?}", args);
+    if args.cuda_process_memory_fraction <= 0.0 || args.cuda_process_memory_fraction > 1.0 {
+        panic!("cuda_process_memory_fraction must be in range 0 < x <= 1");
+    }
 
-    // By default we only have one master shard
-    let num_shard = args.num_shard.unwrap_or(1);
+    match (args.dtype.as_ref(), args.dtype_str.as_ref()) {
+        (Some(dt), Some(dt_s)) if dt != dt_s => panic!(
+            "dtype and dtype_str args both provided with different values"
+        ),
+        _ => (),
+    }
+
+    // Determine number of shards based on command line arg and env vars
+    let num_shard = find_num_shards(args.num_shard);
 
     // Signal handler
     let running = Arc::new(AtomicBool::new(true));
@@ -106,8 +122,13 @@ fn main() -> ExitCode {
                 args.model_name,
                 args.revision,
                 args.deployment_framework,
-                args.dtype_str,
+                args.dtype.or(args.dtype_str),
+                args.max_sequence_length,
+                args.max_new_tokens,
+                args.max_batch_size,
+                args.max_batch_weight,
                 args.shard_uds_path,
+                args.cuda_process_memory_fraction,
                 rank,
                 num_shard,
                 args.master_addr,
@@ -157,7 +178,7 @@ fn main() -> ExitCode {
 
     // All shard started
     // Start webserver
-    tracing::info!("Starting Router");
+    info!("Starting Router");
     let mut argv = vec![
         "text-generation-router".to_string(),
         "--max-concurrent-requests".to_string(),
@@ -172,6 +193,8 @@ fn main() -> ExitCode {
         args.max_waiting_tokens.to_string(),
         "--port".to_string(),
         args.port.to_string(),
+        "--grpc-port".to_string(),
+        args.grpc_port.to_string(),
         "--master-shard-uds-path".to_string(),
         format!("{}-0", args.shard_uds_path),
         "--tokenizer-path".to_string(),
@@ -275,13 +298,56 @@ fn main() -> ExitCode {
 
     // Graceful termination
     webserver.terminate().unwrap();
-    tracing::info!("Waiting for router to gracefully shutdown");
+    info!("Waiting for router to gracefully shutdown");
     webserver.wait_timeout(Duration::from_secs(120)).unwrap();
-    tracing::info!("Router terminated");
+    info!("Router terminated");
     shutdown_shards(shutdown, &shutdown_receiver);
 
     exit_code
 }
+
+
+fn num_cuda_devices() -> Option<usize> {
+    let devices = match env::var("CUDA_VISIBLE_DEVICES") {
+        Ok(devices) => devices,
+        Err(_) => env::var("NVIDIA_VISIBLE_DEVICES").ok()?,
+    };
+    let n_devices = devices.split(',').count();
+    Some(n_devices)
+}
+
+fn find_num_shards(num_shard: Option<usize>) -> usize {
+    // get the number of shards given `num_gpu` and `num_shard`
+    let num_gpus = env::var("NUM_GPUS")
+        .ok().map(|s| s.parse::<usize>().expect("NUM_GPUS must be a positive integer"));
+    let num_shard = match (num_gpus, num_shard) {
+        (Some(num_gpu), None) => num_gpu,
+        (None, Some(num_shard)) => num_shard,
+        (Some(num_gpu), Some(num_shard)) => {
+            if num_gpu != num_shard {
+                panic!("NUM_GPUS and num_shard are set to different values ({num_gpu} and {num_shard})");
+            }
+            num_shard
+        },
+        // try to default to the number of available GPUs
+        (None, None) => match num_cuda_devices() {
+            Some(num_shard) => {
+                info!("Inferring num_shard = {num_shard} from CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES");
+                num_shard
+            },
+            None => {
+                // By default we only have one master shard
+                info!("Defaulting num_shard to 1");
+                1
+            },
+        }
+    };
+    if num_shard < 1 {
+        panic!("`num_shard` / NUM_GPUS cannot be < 1");
+    }
+    num_shard
+}
+
 
 #[derive(Debug)]
 enum ShardStatus {
@@ -294,8 +360,13 @@ fn shard_manager(
     model_name: String,
     revision: Option<String>,
     deployment_framework: String,
-    dtype_str: String,
+    dtype: Option<String>,
+    max_sequence_length: usize,
+    max_new_tokens: usize,
+    max_batch_size: usize,
+    max_batch_weight: Option<usize>,
     uds_path: String,
+    cuda_process_memory_fraction: f32,
     rank: usize,
     world_size: usize,
     master_addr: String,
@@ -316,10 +387,24 @@ fn shard_manager(
         "serve".to_string(),
         model_name,
         deployment_framework,
-        dtype_str,
+        // Max seq length, new tokens, batch size
+        // only used for PT2 compile warmup
+        "--max-sequence-length".to_string(),
+        max_sequence_length.to_string(),
+        "--max-new-tokens".to_string(),
+        max_new_tokens.to_string(),
+        "--max-batch-size".to_string(),
+        max_batch_size.to_string(),
         "--uds-path".to_string(),
         uds_path,
+        "--cuda-process-memory-fraction".to_string(),
+        cuda_process_memory_fraction.to_string(),
     ];
+
+    if let Some(dtype) = dtype {
+        shard_argv.push("--dtype".to_string());
+        shard_argv.push(dtype);
+    }
 
     // Activate tensor parallelism
     if world_size > 1 {
@@ -329,11 +414,27 @@ fn shard_manager(
     // Model optional revision
     if let Some(revision) = revision {
         shard_argv.push("--revision".to_string());
-        shard_argv.push(revision)
+        shard_argv.push(revision);
+    }
+
+    // Maximum batch weight - used only for PT2 compile
+    if let Some(max_batch_weight) = max_batch_weight {
+        shard_argv.push("--max-batch-weight".to_string());
+        shard_argv.push(max_batch_weight.to_string());
     }
 
     // Copy current process env
     let mut env: Vec<(OsString, OsString)> = env::vars_os().collect();
+
+    // Fix up TRANSFORMERS_CACHE and HUGGINGFACE_HUB_CACHE env vars
+    match (env::var("TRANSFORMERS_CACHE"), env::var("HUGGINGFACE_HUB_CACHE")) {
+        (Ok(t), Err(_)) => env.push(("HUGGINGFACE_HUB_CACHE".into(), t.into())),
+        (Err(_), Ok(h)) => env.push(("TRANSFORMERS_CACHE".into(), h.into())),
+        (Ok(t), Ok(h)) if t != h => panic!(
+            "TRANSFORMERS_CACHE and HUGGINGFACE_HUB_CACHE env vars can't be set to different values"
+        ),
+        _ => (),
+    }
 
     // Torch Distributed / DeepSpeed Env vars
     env.push(("RANK".into(), rank.to_string().into()));
@@ -352,8 +453,11 @@ fn shard_manager(
     // Disable python stdout buffering
     env.push(("PYTHONUNBUFFERED".into(), "1".into()));
 
+    // Ensure offline-only
+    env.push(("HF_HUB_OFFLINE".into(), "1".into()));
+
     // Start process
-    tracing::info!("Starting shard {rank}");
+    info!("Starting shard {rank}");
     let mut p = match Popen::create(
         &shard_argv,
         PopenConfig {
@@ -410,13 +514,13 @@ fn shard_manager(
         if *shutdown.lock().unwrap() {
             p.terminate().unwrap();
             let _ = p.wait_timeout(Duration::from_secs(90));
-            tracing::info!("Shard {rank} terminated");
+            info!("Shard {rank} terminated");
             return;
         }
 
         // Shard is ready
         if uds.exists() && !ready {
-            tracing::info!("Shard {rank} ready in {:?}", start_time.elapsed());
+            info!("Shard {rank} ready in {:?}", start_time.elapsed());
             status_sender.send(ShardStatus::Ready).unwrap();
             ready = true;
         } else if !ready && wait_time.elapsed() > Duration::from_secs(10) {
@@ -428,7 +532,7 @@ fn shard_manager(
 }
 
 fn shutdown_shards(shutdown: Arc<Mutex<bool>>, shutdown_receiver: &mpsc::Receiver<()>) {
-    tracing::info!("Shutting down shards");
+    info!("Shutting down shards");
     // Update shutdown value to true
     // This will be picked up by the shard manager
     {
@@ -444,33 +548,44 @@ fn shutdown_shards(shutdown: Arc<Mutex<bool>>, shutdown_receiver: &mpsc::Receive
 
 fn resolve_tokenizer_path(model_name: String, revision: Option<String>) -> Result<String, io::Error> {
     let cache = env::var("TRANSFORMERS_CACHE")
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
-    let model_dir = Path::new(&cache).join(
-        format!("models--{}", model_name.replace("/", "--"))
+        .or_else(|_| env::var("HUGGINGFACE_HUB_CACHE")).ok();
+    let mut model_dir = cache.as_ref().map(
+        |c| Path::new(&c).join(format!("models--{}", model_name.replace("/", "--")))
     );
-    if !model_dir.try_exists()? {
+    if let Some(ref d) = model_dir {
+        if !d.try_exists()? {
+            model_dir = None;
+        }
+    }
+    if let Some(dir) = model_dir {
+        let ref_name = revision.unwrap_or("main".into());
+        let ref_path = dir.join("refs").join(&ref_name);
+        let ref_contents = fs::read_to_string(ref_path)?;
+        let tok_path = dir.join("snapshots")
+            .join(ref_contents).join("tokenizer.json");
+        if tok_path.try_exists()? {
+            Ok(tok_path.to_string_lossy().into())
+        } else {
+            Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "Tokenizer file not found in local cache for model {model_name}, revision {ref_name}"
+                )
+            ))
+        }
+    } else {
         // Try treating model_name as explicit model path
         let try_path = Path::new(&model_name).join("tokenizer.json");
         if try_path.try_exists()? {
-            return Ok(try_path.to_string_lossy().into())
-        }
+             Ok(try_path.to_string_lossy().into())
+        } else {
+            let message = if cache.is_none() {
+                format!("Model path {model_name} not found (TRANSFORMERS_CACHE env var not set)")
+            } else {
+                format!("Model {model_name} not found in local cache")
+            };
 
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            format!("Model {model_name} not found in local cache")
-        ))
-    }
-    let main_ref_path = model_dir.join("refs")
-        .join(revision.unwrap_or("main".into()));
-    let main_ref = fs::read_to_string(main_ref_path)?;
-    let tok_path = model_dir.join("snapshots")
-        .join(main_ref).join("tokenizer.json");
-    if tok_path.try_exists()? {
-        Ok(tok_path.to_string_lossy().into())
-    } else {
-        Err(io::Error::new(
-            ErrorKind::NotFound,
-            format!("Tokenizer file not found in local cache for model {model_name}")
-        ))
+            Err(io::Error::new(ErrorKind::NotFound, message))
+        }
     }
 }
