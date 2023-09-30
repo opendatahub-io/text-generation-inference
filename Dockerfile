@@ -3,7 +3,7 @@ ARG BASE_UBI_IMAGE_TAG=9.2-755
 ARG PROTOC_VERSION=24.3
 #ARG PYTORCH_INDEX="https://download.pytorch.org/whl"
 ARG PYTORCH_INDEX="https://download.pytorch.org/whl/nightly"
-ARG PYTORCH_VERSION=2.1.0.dev20230904
+ARG PYTORCH_VERSION=2.1.0.dev20230905
 
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi:${BASE_UBI_IMAGE_TAG} as base
@@ -201,7 +201,7 @@ FROM python-builder as flash-att-v2-builder
 WORKDIR /usr/src
 
 COPY server/Makefile-flash-att-v2 Makefile
-RUN MAX_JOBS=4 make build-flash-attention-v2
+RUN MAX_JOBS=1 make build-flash-attention-v2
 
 ## Build flash attention  ######################################################
 FROM python-builder as flash-att-builder
