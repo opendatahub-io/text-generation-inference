@@ -313,6 +313,7 @@ RUN pip list -v --disable-pip-version-check --no-python-version-warning
 COPY --from=router-builder /usr/local/cargo/bin/text-generation-router /usr/local/bin/text-generation-router
 # Install launcher
 COPY --from=launcher-builder /usr/local/cargo/bin/text-generation-launcher /usr/local/bin/text-generation-launcher
+COPY --chown=0:0 --chmod=554 scripts/wait-modelcar.sh /usr/local/bin/wait-modelcar.sh
 
 ENV PORT=3000 \
     GRPC_PORT=8033 \
@@ -330,4 +331,5 @@ USER tgis
 EXPOSE ${PORT}
 EXPOSE ${GRPC_PORT}
 
+ENTRYPOINT ["wait-modelcar.sh"]
 CMD text-generation-launcher
