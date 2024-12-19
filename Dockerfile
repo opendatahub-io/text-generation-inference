@@ -1,5 +1,5 @@
 ## Global Args #################################################################
-ARG BASE_UBI_IMAGE_TAG=9.4-1214
+ARG BASE_UBI_IMAGE_TAG=9.5-1734495538
 ARG PROTOC_VERSION=25.3
 ARG PYTORCH_INDEX="https://download.pytorch.org/whl"
 # ARG PYTORCH_INDEX="https://download.pytorch.org/whl/nightly"
@@ -27,6 +27,7 @@ RUN dnf remove -y --disableplugin=subscription-manager \
     && dnf install -y make \
         # to help with debugging
         procps \
+    && dnf update -y \
     && dnf clean all
 
 ENV LANG=C.UTF-8 \
