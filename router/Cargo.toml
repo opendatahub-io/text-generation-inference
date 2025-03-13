@@ -28,6 +28,7 @@ num = "^0.4.2"
 num_cpus = "^1.16.0"
 hyper = "^0.14.28" # Override to address CVE-2023-26964
 h2 = "^0.3.26 "  # Override to address CVEs
+native-tls = "0.2.13"
 openssl = "^0.10.64" # Override to address WS-2023-0082, WS-2023-0083, WS-2023-0195
 openssl-sys = "^0.9.102" # Override to address WS-2023-0082, WS-2023-0083, WS-2023-0195
 rustls-webpki = "0.102.2" # Override to address WS-2023-0305, CVE-2018-16875
