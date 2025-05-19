@@ -36,7 +36,7 @@ spec:
   - name: build-source-image
     value: false
   - name: build-image-index
-    value: true
+    value: false
   - name: rebuild
     value: true
   - name: skip-checks
