@@ -28,7 +28,7 @@ transformers = "4.40.2"
 #    cannot import name 'OfflineModeIsEnabled' from 'huggingface_hub.errors'
 optimum = { version = "1.20.0", extras = ["onnxruntime-gpu"], optional = true }
 # onnxruntime pinned to <1.18.1 which uses cuDNN 9 until we upgrade torch to 2.4
-onnxruntime = { version = "1.18.0", optional = true }
+onnxruntime = { version = "1.22.0", optional = true }
 onnxruntime-gpu = { version = "1.18.0", optional = true }
 onnx = { version = "^1.16.0", optional = true }
 einops = "^0.7.0"
