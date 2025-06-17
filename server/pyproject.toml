@@ -10,7 +10,7 @@ text-generation-server = 'text_generation_server.cli:app'
 [tool.poetry.dependencies]
 python = ">=3.11.0,<3.13"
 # grpc is not yet compatible with newer protobuf
-protobuf = "^4.25.3"
+protobuf = "^4.25.8"
 grpcio = "^1.62.2"
 grpcio-reflection = "^1.62.2"
 loguru = "^0.7.2"
