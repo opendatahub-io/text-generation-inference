@@ -43,7 +43,7 @@ rustls = "0.22.4"
 tracing = "^0.1.40"
 prost = "^0.12.4"
 tonic = { version = "^0.11.0", features = ["tls"] }
-tracing-subscriber = { version = "0.3.18", features = ["json", "env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["json", "env-filter"] }
 tracing-opentelemetry = "0.23.0"
 tokio-stream ="^0.1.15"
 unicode-segmentation = "^1.11.0"
